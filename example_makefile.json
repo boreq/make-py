@@ -1,0 +1,39 @@
+{
+    "path": "./",
+    "tasks": [
+        {
+            "input": [
+                "test_files/css_test.css",
+                "test_files/scss_test.scss",
+                "test_files/min_css_test.min.css"
+            ],
+            "output": "test_files/output.css"
+        }
+    ],
+    "chains": [
+        [
+            {
+                "extension": ".scss",
+                "tool": "sass %s %s"
+            },
+            {
+                "extension": ".css",
+                "tool": "yui-compressor %s > %s"
+            },
+            {
+                "extension": ".min.css",
+                "tool": null
+            }
+        ],
+        [
+            {
+                "extension": ".js",
+                "tool": "yui-compressor %s > %s"
+            },
+            {
+                "extension": ".min.js",
+                "tool": null
+            }
+        ]
+    ]
+}
