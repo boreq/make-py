@@ -1,135 +1,210 @@
 #!/usr/bin/env python
-import os, argparse, json, sys, logging
+import argparse
+import json
+import logging
+import os
+import sys
+
+
+def replace_extension(path, in_ext, out_ext):
+    """Replaces an extension.
+
+    path: path in which the extension will change
+    in_ext: input extension.
+    out_ext: output extension.
+    """
+    return path[:-len(in_ext)] + out_ext
+
 
 class ToolData(object):
+    """Stores the name of the conversion program and extensions of the input and
+    output file.
+    """
+
     def __init__(self, chain_element, next_chain_element):
         self.tool = chain_element['tool']
-        self.ext_in = chain_element['extension']
+        self.input_ext = chain_element['extension']
+        self.output_ext = None
         if next_chain_element is not None:
-            self.ext_out = next_chain_element['extension']
-        else:
-            self.ext_out = None
+            self.output_ext = next_chain_element['extension']
 
-class ChainLink(object):
-    def __init__(self, path_in, path_out, tool_data):
-        self.path_in = path_in
-        self.path_out = path_out
+
+class Conversion(object):
+    """Stores paths of the input and output files and tool used for conversion.
+
+    input_path: path to the input file.
+    output_path: path to the output file created by this conversion.
+    tool_data: tool used to convert the file. ToolData object.
+    """
+
+    def __init__(self, input_path, output_path, tool_data):
+        self.input_path = input_path
+        self.output_path = output_path
         self.tool_data = tool_data
 
-    def get_tool(self):
-        return self.tool_data.tool
+    @property
+    def command(self):
+        return self.tool_data.tool % (
+            self.input_path,
+            self.output_path
+        )
 
-def replace_extension(file_path, current_ext, future_ext):
-    return file_path[:-len(current_ext)] + future_ext
 
-def get_full_path(file_path):
-    return os.path.abspath(os.path.join(makefile_dir, makefile_data['path'], file_path))
+class Task(object):
+    """Task defined in the makefile."""
+    def __init__(self, input_files, output_file):
+        self.input_files = input_files
+        self.output_file = output_file
 
-def find_tool(file_path):
-    """Finds out how to convert a file."""
-    next_chain_element = None
 
-    for chain in makefile_data['chains']:
-        for chain_element in reversed(chain):
-            if file_path.endswith(chain_element['extension']): 
-                return ToolData(chain_element, next_chain_element)
-            next_chain_element = chain_element
+class Makefile(object):
+    """Provides ways to query a makefile."""
 
-    return None
+    def __init__(self, makefile=None):
+        if makefile is not None:
+            self.load(makefile)
 
-def get_conversion_chain(path_in):
-    """Get all stages of conversion for the given file (all paths one by one)."""
-    chain = []
+    def _get_full_path(self, relative_path):
+        """Converts relative path defined in the makefile to absolute path."""
+        absolute_path = os.path.join(self.makefile_dir, self.makefile_data['path'],
+                                     relative_path)
+        return os.path.abspath(absolute_path)
 
-    while True:
-        tool_data = find_tool(path_in)
-        if tool_data.tool is None:
-            break
-        path_out = replace_extension(path_in, tool_data.ext_in, tool_data.ext_out)
-        chain.append(ChainLink(path_in, path_out, tool_data))
-        path_in = path_out
+    def load(self, makefile):
+        """Loads a makefile.
 
-    return chain
+        makefile: path to a makefile.
+        """
+        with open(makefile, 'r') as f:
+            self.makefile_data = json.load(f)
 
-def process_file(path_in):
-    """Applies all specified conversion steps to a file and returns its final name."""
-    logging.debug('Process %s', path_in)
-    sys.stdout.write('*')
+        self.makefile_path = makefile
+        self.makefile_dir = os.path.dirname(makefile)
 
-    conversion_chain = get_conversion_chain(path_in)
+        # Convert all relative path to absolute paths.
+        for task in self.makefile_data['tasks']:
+            task['input'] = [self._get_full_path(path) for path in task['input']]
+            task['output'] = self._get_full_path(task['output'])
 
-    if len(conversion_chain) == 0:
-        return path_in
+    def find_tool(self, input_path):
+        """Finds a tool used for conversion. Returns ToolData.
 
-    for chain_link in conversion_chain:
-        logging.debug('Convert %s to %s using %s' % (chain_link.path_in, chain_link.path_out, chain_link.get_tool()))
-        sys.stdout.write('*')
-        command = chain_link.get_tool() % (get_full_path(chain_link.path_in), get_full_path(chain_link.path_out))
+        input_path: path to a converted file. It will be used to get file
+                    extension.
+        """
+        next_chain_element = None
+        for chain in self.makefile_data['chains']:
+            for chain_element in reversed(chain):
+                if input_path.endswith(chain_element['extension']):
+                    return ToolData(chain_element, next_chain_element)
+                next_chain_element = chain_element
+        return None
+
+    def get_conversion_chain(self, input_path):
+        """Get all conversion steps for the given file (list of Conversion
+        objects).
+        """
+        chain = []
+        while True:
+            tool_data = self.find_tool(input_path)
+            if tool_data.tool is None:
+                break
+            output_path = replace_extension(input_path, tool_data.input_ext, tool_data.output_ext)
+            chain.append(Conversion(input_path, output_path, tool_data))
+            input_path = output_path
+        return chain
+
+    def task_generator(self):
+        for task in self.makefile_data['tasks']:
+            yield Task(task['input'], task['output'])
+
+
+class Make(object):
+    """Executes task defined in the Makefile.
+
+    makefile: Makefile object.
+    """
+
+    def __init__(self, makefile, dry_run=False):
+        self.makefile = makefile
+        self.dry_run = dry_run
+
+    def stdout(self, text):
+        """Writes to stdout."""
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    def execute(self, command):
+        """Executes a command."""
         logging.debug(command)
-        if not args.dryrun:
+        if not self.dry_run:
             if os.system(command) != 0:
-                sys.exit(1)
+                raise Exception('Could not execute command:\n%s' % command)
 
-    # Return the path of the last output file.
-    return conversion_chain[-1].path_out
+    def concat(self, file_list, output_path):
+        self.stdout(' > ')
+        command = 'cat %s > %s' % (' '.join(file_list), output_path)
+        self.execute(command)
 
-def get_intermediate_files(file_path):
-    """Get the list intemediate files created during conversion."""
-    return [chain_link.path_out for chain_link in get_conversion_chain(file_path)]
+    def remove_files(self, file_list):
+        for file_path in file_list:
+            self.stdout('-')
+            logging.debug('Remove %s', file_path)
+            if not self.dry_run:
+                os.remove(file_path)
 
-def handle(task):
-    final_files = []
+    def convert_file(self, input_path):
+        """Converts the file using defined conversion chains. Returns its final
+        path.
+        """
+        conversion_chain = self.makefile.get_conversion_chain(input_path)
+        if len(conversion_chain) == 0:
+            return input_path
 
-    # Process files (create all intermediate files to produce the final output files).
-    for path_in in task['input']:
-        final_files.append(process_file(path_in))
+        for conversion in conversion_chain:
+            self.stdout('*')
+            self.execute(conversion.command)
 
-    # Concat the final output files.
-    sys.stdout.write(' > ')
+        return conversion_chain[-1].output_path
 
-    final_files = [get_full_path(file_path) for file_path in final_files]
-    command = 'cat %s > %s' % (' '.join(final_files), get_full_path(task['output']))
-    logging.debug(command)
-    if not args.dryrun:
-        if os.system(command) != 0:
-            sys.exit(1)
+    def get_intermediate_files(self, file_path):
+        """Get the list intemediate files created during conversion."""
+        return [conversion.output_path \
+            for conversion in self.makefile.get_conversion_chain(file_path)]
 
-    # Remove all intermediate files to clean up.
-    for file_path in task['input']:
-        for intermediate_file in get_intermediate_files(file_path):
-            remove_path = get_full_path(intermediate_file)
-            sys.stdout.write('-')
-            logging.debug('Remove %s', intermediate_file)
-            logging.debug('Remove path %s', remove_path)
-            if not args.dryrun:
-                try:
-                    os.remove(remove_path)
-                except:
-                    pass
+    def run(self, task):
+        """Process files, concat them and delete intermidiate files."""
+        final_paths = []
+        for input_path in task.input_files:
+            final_path = self.convert_file(input_path)
+            final_paths.append(final_path)
 
-# Parse the arguments.
-parser = argparse.ArgumentParser()
-parser.add_argument('-m', '--makefile', help='Path to a makefile relative to the current working directory.', default='makefile.json')
-parser.add_argument('--dryrun', help='Don\'t execute any commands.', action='store_true')
-parser.add_argument('--verbosity', help='', default='warning', choices=['critical', 'error', 'warning', 'info', 'debug'])
-args = parser.parse_args()
+        self.concat(final_paths, task.output_file)
 
-# Configure logging.
-numeric_level = getattr(logging, args.verbosity.upper(), None)
-logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=numeric_level)
+        for input_path in task.input_files:
+            self.remove_files(self.get_intermediate_files(input_path))
 
-# Set the path to the makefile and its directory.
-makefile_path = os.path.join(os.getcwd(), args.makefile)
-makefile_dir = os.path.dirname(makefile_path)
+    def all(self):
+        """Run all tasks defined in the makefile."""
+        for task in self.makefile.task_generator():
+            self.run(task)
+            self.stdout('\n')
 
-# Load json data.
-with open(makefile_path, 'r') as f:
-    makefile_data = json.load(f)
 
-logging.debug('Passed arguments %s', args)
-logging.debug('makefile_path %s', makefile_path)
-logging.debug('makefile_dir %s', makefile_dir)
+if __name__ == '__main__':
+    # Parse the arguments.
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--makefile', default='makefile.json',
+                        help='Relative path to a makefile.')
+    parser.add_argument('--verbosity', default='warning',
+                        choices=['critical', 'error', 'warning', 'info', 'debug'])
+    parser.add_argument('--dryrun', action='store_true')
+    args = parser.parse_args()
 
-for task in makefile_data['tasks']:
-    handle(task)
-    sys.stdout.write('\n')
+    # Configure logging.
+    numeric_level = getattr(logging, args.verbosity.upper(), None)
+    logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s', level=numeric_level)
+
+    makefile = Makefile(args.makefile)
+    make = Make(makefile, dry_run=args.dryrun)
+    make.all()
